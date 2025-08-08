@@ -1,4 +1,0 @@
-{
-  "version": 2,
-  "builds": [{ "src": "api/update-variant-inventory.js", "use": "@vercel/node" }]
-}
