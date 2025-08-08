@@ -1,0 +1,10 @@
+{
+  "name": "shopify-variant-inventory",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "start": "vercel dev"
+  },
+  "dependencies": {}
+}

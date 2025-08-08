@@ -2,7 +2,7 @@ export default async function handler(req, res) {
   const STORE = process.env.SHOPIFY_STORE_DOMAIN;
   const ADMIN_API_KEY = process.env.SHOPIFY_ADMIN_API_KEY;
   const API_VERSION = '2025-07';
-  const DRY_RUN = req.query.dryRun === 'true';
+  const DRY_RUN = req.query.dryRun !== 'false'; // Dry run by default
   const FILTER_PRODUCT_IDS = req.query.productIds ? req.query.productIds.split(',').map((id) => id.trim()) : null;
 
   const endpoint = `https://${STORE}/admin/api/${API_VERSION}/graphql.json`;
