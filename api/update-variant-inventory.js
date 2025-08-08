@@ -33,7 +33,9 @@ export default async function handler(req, res) {
                 inventoryLevels(first: 50) {
                   edges {
                     node {
-                      available
+                      available: quantities(names: "available") {
+                          quantity
+                        }
                       location {
                         name
                       }
@@ -77,7 +79,7 @@ export default async function handler(req, res) {
 
       for (const level of levels) {
         const locName = level.node.location.name;
-        inventory[locName] = level.node.available;
+        inventory[locName] = level.node.available.quantity;
       }
 
       if (DRY_RUN) {
