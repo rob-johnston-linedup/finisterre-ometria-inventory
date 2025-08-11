@@ -17,35 +17,40 @@ export default async function handler(req, res) {
   let updatedCount = 0;
   const dryRunLog = [];
 
-  while (hasNextPage) {
+  // Build search query for server-side filtering
+  let searchQuery = 'NOT metafield_namespaces:linedup';
+  if (FILTER_PRODUCT_IDS?.length) {
+    const productQueries = FILTER_PRODUCT_IDS.map((id) => `product_id:${id}`).join(' OR ');
+    searchQuery = `(${productQueries}) AND ${searchQuery}`;
+  }
+
+  // Single page fetch
+  async function fetchPage(cursor) {
     const query = `
-      query GetVariants($cursor: String) {
-        productVariants(first: 250, after: $cursor) {
+      query GetVariants($cursor: String, $search: String) {
+        productVariants(first: 250, after: $cursor, query: $search) {
           edges {
             cursor
             node {
               id
-              product {
-                id
-              }
               inventoryItem {
-                id
                 inventoryLevels(first: 50) {
                   edges {
                     node {
                       available: quantities(names: "available") {
-                          quantity
-                        }
+                        quantity
+                      }
                       location {
                         name
+                        address {
+                          address1
+                          zip
+                          phone
+                        }
                       }
                     }
                   }
                 }
-              }
-              metafield(namespace: "linedup", key: "inventory_json") {
-                id
-                value
               }
             }
           }
@@ -59,86 +64,108 @@ export default async function handler(req, res) {
     const response = await fetch(endpoint, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ query, variables: { cursor } }),
+      body: JSON.stringify({ query, variables: { cursor, search: searchQuery } }),
     });
 
-    const json = await response.json();
-    const variants = json.data.productVariants.edges;
-    hasNextPage = json.data.productVariants.pageInfo.hasNextPage;
-    cursor = variants[variants.length - 1]?.cursor;
+    return response.json();
+  }
+
+  // Process and optionally write in batches
+  async function processPage(variants) {
+    const metafieldBatch = [];
 
     for (const edge of variants) {
       const variant = edge.node;
-
-      const productId = variant.product?.id?.split('/').pop();
-      if (FILTER_PRODUCT_IDS && !FILTER_PRODUCT_IDS.includes(productId)) continue;
-      if (variant.metafield) continue;
-
       const levels = variant.inventoryItem?.inventoryLevels?.edges || [];
-      const inventory = {};
 
-      for (const level of levels) {
-        const locName = level.node.location.name;
-        inventory[locName] = level.node.available.quantity;
-      }
+      const inventory = levels.map((level) => ({
+        store: {
+          name: level.node.location.name,
+          address1: level.node.location.address?.address1 || '',
+          zip: level.node.location.address?.zip || '',
+          phone: level.node.location.address?.phone || '',
+        },
+        available: level.node.available?.quantity ?? 0,
+      }));
 
       if (DRY_RUN) {
-        console.log(`DRY RUN — Variant: ${variant.id}`, inventory);
         dryRunLog.push({ variantId: variant.id, inventory });
         continue;
       }
 
-      const mutation = `
-        mutation SetInventoryMetafield($metafields: [MetafieldsSetInput!]!) {
-          metafieldsSet(metafields: $metafields) {
-            metafields {
-              id
-              key
-              value
-            }
-            userErrors {
-              field
-              message
-            }
-          }
-        }
-      `;
-
-      const variables = {
-        metafields: [
-          {
-            ownerId: variant.id,
-            namespace: 'linedup',
-            key: 'inventory_json',
-            type: 'json',
-            value: JSON.stringify(inventory),
-          },
-        ],
-      };
-
-      const writeRes = await fetch(endpoint, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ query: mutation, variables }),
+      metafieldBatch.push({
+        ownerId: variant.id,
+        namespace: 'linedup',
+        key: 'inventory_json',
+        type: 'json',
+        value: JSON.stringify(inventory),
       });
 
-      const writeJson = await writeRes.json();
-      if (writeJson.data?.metafieldsSet?.metafields?.length > 0) {
-        console.log(`✅ Updated metafield for variant: ${variant.id}`);
-        updatedCount++;
-      } else {
-        console.error(`❌ Failed to write metafield for variant: ${variant.id}`, writeJson);
+      // If batch reaches 25, send immediately
+      if (metafieldBatch.length === 25) {
+        await writeBatch(metafieldBatch);
+        metafieldBatch.length = 0;
       }
+    }
+
+    // Flush remaining in batch
+    if (!DRY_RUN && metafieldBatch.length) {
+      await writeBatch(metafieldBatch);
     }
   }
 
-  if (DRY_RUN) {
-    console.log(`DRY RUN complete. ${dryRunLog.length} variants would be updated.`);
-    return res
-      .status(200)
-      .json({ message: `Dry run complete. ${dryRunLog.length} variants would be updated.`, variants: dryRunLog });
+  // Batch writer
+  async function writeBatch(batch) {
+    const mutation = `
+      mutation SetInventoryMetafield($metafields: [MetafieldsSetInput!]!) {
+        metafieldsSet(metafields: $metafields) {
+          metafields {
+            id
+            key
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    const resBatch = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ query: mutation, variables: { metafields: batch } }),
+    });
+
+    const writeJson = await resBatch.json();
+    const errors = writeJson.data?.metafieldsSet?.userErrors || [];
+    if (errors.length) {
+      console.error('Batch write errors:', errors);
+    } else {
+      updatedCount += batch.length;
+      console.log(`✅ Updated ${batch.length} variants in one batch`);
+    }
   }
 
-  console.log(`🎉 Completed. Updated ${updatedCount} variants.`);
-  return res.status(200).json({ message: `Updated ${updatedCount} variants.` });
+  // Main loop
+  while (hasNextPage) {
+    const json = await fetchPage(cursor);
+    const variants = json.data.productVariants.edges;
+    hasNextPage = json.data.productVariants.pageInfo.hasNextPage;
+    cursor = variants[variants.length - 1]?.cursor;
+
+    await processPage(variants);
+  }
+
+  // Final response
+  if (DRY_RUN) {
+    console.log(`DRY RUN complete. ${dryRunLog.length} variants would be updated.`);
+    return res.status(200).json({
+      message: `Dry run complete. ${dryRunLog.length} variants would be updated.`,
+      variants: dryRunLog,
+    });
+  } else {
+    console.log(`🎉 Completed. Updated ${updatedCount} variants.`);
+    return res.status(200).json({ message: `Updated ${updatedCount} variants.` });
+  }
 }
