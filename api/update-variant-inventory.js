@@ -17,15 +17,20 @@ export default async function handler(req, res) {
   let updatedCount = 0;
   const dryRunLog = [];
 
-  // Build search query for server-side filtering
+  // Build search query to filter only variants without the metafield
   let searchQuery = 'NOT metafield_namespaces:linedup';
   if (FILTER_PRODUCT_IDS?.length) {
     const productQueries = FILTER_PRODUCT_IDS.map((id) => `product_id:${id}`).join(' OR ');
     searchQuery = `(${productQueries}) AND ${searchQuery}`;
   }
 
-  // Single page fetch
+  console.log(`🔍 Starting inventory update...`);
+  console.log(`   Dry run: ${DRY_RUN}`);
+  console.log(`   Search query: ${searchQuery}`);
+
+  // Fetch a single page of variants
   async function fetchPage(cursor) {
+    console.log(`📡 Fetching page after cursor: ${cursor || '(start)'}`);
     const query = `
       query GetVariants($cursor: String, $search: String) {
         productVariants(first: 250, after: $cursor, query: $search) {
@@ -37,7 +42,8 @@ export default async function handler(req, res) {
                 inventoryLevels(first: 50) {
                   edges {
                     node {
-                      available: quantities(names: "available") {
+                      quantities {
+                        name
                         quantity
                       }
                       location {
@@ -67,10 +73,16 @@ export default async function handler(req, res) {
       body: JSON.stringify({ query, variables: { cursor, search: searchQuery } }),
     });
 
-    return response.json();
+    const json = await response.json();
+
+    if (!json.data) {
+      console.error('❌ GraphQL fetch error:', JSON.stringify(json, null, 2));
+    }
+
+    return json;
   }
 
-  // Process and optionally write in batches
+  // Process variants and prepare metafield updates
   async function processPage(variants) {
     const metafieldBatch = [];
 
@@ -78,15 +90,24 @@ export default async function handler(req, res) {
       const variant = edge.node;
       const levels = variant.inventoryItem?.inventoryLevels?.edges || [];
 
-      const inventory = levels.map((level) => ({
-        store: {
-          name: level.node.location.name,
-          address1: level.node.location.address?.address1 || '',
-          zip: level.node.location.address?.zip || '',
-          phone: level.node.location.address?.phone || '',
-        },
-        available: level.node.available?.quantity ?? 0,
-      }));
+      console.log(`   Processing variant: ${variant.id}`);
+      const inventory = levels.map((level) => {
+        // Find "available" quantity for this location
+        const availableEntry = (level.node.quantities || []).find((q) => q.name === 'available');
+        const availableQuantity = availableEntry ? availableEntry.quantity : 0;
+
+        console.log(`     Location: ${level.node.location.name} — Available: ${availableQuantity}`);
+
+        return {
+          store: {
+            name: level.node.location.name,
+            address1: level.node.location.address?.address1 || '',
+            zip: level.node.location.address?.zip || '',
+            phone: level.node.location.address?.phone || '',
+          },
+          available: availableQuantity,
+        };
+      });
 
       if (DRY_RUN) {
         dryRunLog.push({ variantId: variant.id, inventory });
@@ -101,27 +122,29 @@ export default async function handler(req, res) {
         value: JSON.stringify(inventory),
       });
 
-      // If batch reaches 25, send immediately
+      // Flush batch when full
       if (metafieldBatch.length === 25) {
         await writeBatch(metafieldBatch);
         metafieldBatch.length = 0;
       }
     }
 
-    // Flush remaining in batch
+    // Flush remaining metafields
     if (!DRY_RUN && metafieldBatch.length) {
       await writeBatch(metafieldBatch);
     }
   }
 
-  // Batch writer
+  // Send batch mutation to Shopify
   async function writeBatch(batch) {
+    console.log(`📝 Writing batch of ${batch.length} metafields...`);
     const mutation = `
       mutation SetInventoryMetafield($metafields: [MetafieldsSetInput!]!) {
         metafieldsSet(metafields: $metafields) {
           metafields {
             id
             key
+            value
           }
           userErrors {
             field
@@ -138,28 +161,28 @@ export default async function handler(req, res) {
     });
 
     const writeJson = await resBatch.json();
-    const errors = writeJson.data?.metafieldsSet?.userErrors || [];
-    if (errors.length) {
-      console.error('Batch write errors:', errors);
+
+    if (writeJson.data?.metafieldsSet?.userErrors?.length) {
+      console.error('❌ Batch write userErrors:', JSON.stringify(writeJson.data.metafieldsSet.userErrors, null, 2));
     } else {
       updatedCount += batch.length;
-      console.log(`✅ Updated ${batch.length} variants in one batch`);
+      console.log(`✅ Updated ${batch.length} variants in this batch`);
     }
   }
 
-  // Main loop
+  // Loop through pages of variants
   while (hasNextPage) {
     const json = await fetchPage(cursor);
-    const variants = json.data.productVariants.edges;
-    hasNextPage = json.data.productVariants.pageInfo.hasNextPage;
+    const variants = json.data?.productVariants?.edges || [];
+    hasNextPage = json.data?.productVariants?.pageInfo?.hasNextPage;
     cursor = variants[variants.length - 1]?.cursor;
 
     await processPage(variants);
   }
 
-  // Final response
+  // Final output
   if (DRY_RUN) {
-    console.log(`DRY RUN complete. ${dryRunLog.length} variants would be updated.`);
+    console.log(`🏁 Dry run complete. ${dryRunLog.length} variants would be updated.`);
     return res.status(200).json({
       message: `Dry run complete. ${dryRunLog.length} variants would be updated.`,
       variants: dryRunLog,
