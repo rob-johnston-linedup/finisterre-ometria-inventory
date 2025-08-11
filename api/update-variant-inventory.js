@@ -93,7 +93,6 @@ export default async function handler(req, res) {
       const inventory = levels.map((level) => {
         const availableQuantity = (level.node.quantities?.[0]?.quantity) || 0;
 
-        console.log(`     Level JSON:`, level);
         console.log(`     Location: ${level.node.location.name} — Available: ${availableQuantity}`);
 
         return {
@@ -141,6 +140,7 @@ export default async function handler(req, res) {
         metafieldsSet(metafields: $metafields) {
           metafields {
             id
+            namespace
             key
             value
           }
@@ -159,6 +159,7 @@ export default async function handler(req, res) {
     });
 
     const writeJson = await resBatch.json();
+    console.log('MetafieldsSet response:', JSON.stringify(writeJson, null, 2));
 
     if (writeJson.data?.metafieldsSet?.userErrors?.length) {
       console.error('❌ Batch write userErrors:', JSON.stringify(writeJson.data.metafieldsSet.userErrors, null, 2));
