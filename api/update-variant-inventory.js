@@ -42,8 +42,7 @@ export default async function handler(req, res) {
                 inventoryLevels(first: 50) {
                   edges {
                     node {
-                      quantities {
-                        name
+                      quantities(names: "available") {
                         quantity
                       }
                       location {
@@ -92,10 +91,9 @@ export default async function handler(req, res) {
 
       console.log(`   Processing variant: ${variant.id}`);
       const inventory = levels.map((level) => {
-        // Find "available" quantity for this location
-        const availableEntry = (level.node.quantities || []).find((q) => q.name === 'available');
-        const availableQuantity = availableEntry ? availableEntry.quantity : 0;
+        const availableQuantity = (level.node.quantities?.[0]?.quantity) || 0;
 
+        console.log(`     Level JSON:`, level);
         console.log(`     Location: ${level.node.location.name} — Available: ${availableQuantity}`);
 
         return {
